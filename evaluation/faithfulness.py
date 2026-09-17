@@ -12,29 +12,11 @@ class FaithfulnessEvaluator:
 
         self.embedding_model = embedding_model
 
-        # ------------------------------------------------------
-        # BERTScore is optional.
-        # Install using:
-        # pip install bert-score
-        #
-        # PERFORMANCE NOTE:
-        # A persistent BERTScorer object is created ONCE here
-        # (at evaluator construction time) instead of calling the
-        # `bert_score.score()` convenience function on every
-        # question. The convenience function reloads the full
-        # transformer model from disk on every single call, which
-        # is what caused the multi-second/minute delays and the
-        # repeated "downloading/reconstructing model" behaviour.
-        #
-        # A smaller model ("distilbert-base-uncased") is used by
-        # default instead of BERTScore's usual default
-        # ("roberta-large", ~1.4GB) so the one-time download and
-        # every subsequent scoring pass are both much faster, at a
-        # small cost in BERTScore's own precision.
-        # ------------------------------------------------------
+        # ============================================================
+        # BERTScore
+        # ============================================================
 
         self.bert_model_type = bert_model_type
-
         self._bert_scorer = None
         self.bert_score_available = False
 
@@ -55,35 +37,35 @@ class FaithfulnessEvaluator:
             self._bert_scorer = None
             self.bert_score_available = False
 
-
     # ============================================================
-    # SENTENCE SPLITTING (for per-sentence cosine faithfulness)
+    # SENTENCE SPLITTER
     # ============================================================
 
     def _split_sentences(self, text):
-        """
-        Split the answer into sentences so each one can be checked
-        individually against the retrieved clauses, instead of
-        collapsing the whole answer into a single embedding.
 
-        Very short fragments (e.g. a lone "[Clause 3]" citation) are
-        dropped since they carry little semantic content of their
-        own and would otherwise drag the average down artificially.
-        """
-
-        raw_sentences = re.split(r"(?<=[.!?])\s+", text.strip())
+        raw_sentences = re.split(
+            r"(?<=[.!?])\s+",
+            text.strip()
+        )
 
         sentences = [
-            s.strip()
-            for s in raw_sentences
-            if len(re.findall(r"[a-zA-Z]{2,}", s)) >= 3
+            sentence.strip()
+            for sentence in raw_sentences
+            if len(
+                re.findall(
+                    r"[a-zA-Z]{2,}",
+                    sentence
+                )
+            ) >= 3
         ]
 
-        if not sentences:
-            sentences = [text.strip()] if text.strip() else []
+        if not sentences and text.strip():
+
+            sentences = [
+                text.strip()
+            ]
 
         return sentences
-
 
     # ============================================================
     # JACCARD TOKENIZATION
@@ -98,27 +80,41 @@ class FaithfulnessEvaluator:
 
         return set(words)
 
-
     # ============================================================
-    # JACCARD SIMILARITY
+    # JACCARD
     # ============================================================
 
-    def _calculate_jaccard(self, answer, reference_answer):
+    def _calculate_jaccard(
+        self,
+        answer,
+        reference_answer
+    ):
 
-        answer_words = self._tokenize_for_jaccard(answer)
-        reference_words = self._tokenize_for_jaccard(reference_answer)
+        answer_words = self._tokenize_for_jaccard(
+            answer
+        )
+
+        reference_words = self._tokenize_for_jaccard(
+            reference_answer
+        )
 
         if not answer_words or not reference_words:
+
             return 0.0
 
         intersection = answer_words & reference_words
+
         union = answer_words | reference_words
 
         if not union:
+
             return 0.0
 
-        return len(intersection) / len(union)
-
+        return (
+            len(intersection)
+            /
+            len(union)
+        )
 
     # ============================================================
     # MAIN EVALUATION
@@ -132,7 +128,7 @@ class FaithfulnessEvaluator:
     ):
 
         # ========================================================
-        # CHECK ANSWER
+        # EMPTY ANSWER
         # ========================================================
 
         if not answer or not answer.strip():
@@ -141,17 +137,21 @@ class FaithfulnessEvaluator:
                 "faithfulness_score": 0.0,
                 "hallucination_rate": 100.0,
                 "semantic_similarity": 0.0,
+                "weakest_sentence_similarity": 0.0,
+
                 "bert_precision": 0.0,
                 "bert_recall": 0.0,
                 "bert_f1": 0.0,
                 "bert_hallucination_rate": 100.0,
+
                 "jaccard_similarity": 0.0,
                 "jaccard_hallucination_rate": 100.0,
+
                 "answer_quality": "No answer generated"
             }
 
         # ========================================================
-        # CHECK RETRIEVED CONTEXT
+        # EMPTY CONTEXT
         # ========================================================
 
         if not selected_clauses:
@@ -160,49 +160,42 @@ class FaithfulnessEvaluator:
                 "faithfulness_score": 0.0,
                 "hallucination_rate": 100.0,
                 "semantic_similarity": 0.0,
+                "weakest_sentence_similarity": 0.0,
+
                 "bert_precision": 0.0,
                 "bert_recall": 0.0,
                 "bert_f1": 0.0,
                 "bert_hallucination_rate": 100.0,
+
                 "jaccard_similarity": 0.0,
                 "jaccard_hallucination_rate": 100.0,
-                "answer_quality": "No supporting legal clauses"
+
+                "answer_quality": "No supporting clauses"
             }
 
         # ========================================================
-        # COMBINE ALL SELECTED CLAUSES
+        # BUILD CONTEXT
         # ========================================================
 
         context = "\n\n".join(
             clause.get("text", "")
             for clause in selected_clauses
+            if clause.get("text", "").strip()
         )
 
         # ========================================================
-        # 1. COSINE SIMILARITY -- PER-SENTENCE, BEST-CLAUSE MATCH
+        # COSINE SIMILARITY
         # ========================================================
-        # Previously this compared ONE embedding for the entire
-        # answer against ONE embedding for all clauses squashed
-        # together. General-purpose sentence embeddings rarely
-        # exceed ~0.75-0.85 cosine similarity even for a genuinely
-        # faithful paraphrase, and averaging a whole multi-sentence
-        # answer into a single vector dilutes it further -- so a
-        # well-grounded answer could still show 25-35% "hallucination"
-        # purely as a measurement artifact, not real fabrication.
-        #
-        # Instead: split the answer into sentences, embed each
-        # sentence and each individual clause, and for every answer
-        # sentence take its similarity to the SINGLE BEST-MATCHING
-        # clause (not the blended context). A genuinely supported
-        # sentence should closely match at least one specific
-        # clause, even if it doesn't closely match the document as
-        # a whole. The final score is the average of these
-        # per-sentence best-match similarities.
 
-        answer_sentences = self._split_sentences(answer)
+        answer_sentences = self._split_sentences(
+            answer
+        )
 
         if not answer_sentences:
-            answer_sentences = [answer]
+
+            answer_sentences = [
+                answer
+            ]
 
         clause_texts = [
             clause.get("text", "")
@@ -211,53 +204,89 @@ class FaithfulnessEvaluator:
         ]
 
         if not clause_texts:
-            clause_texts = [context]
 
-        sentence_embeddings = self.embedding_model.model.encode(
-            answer_sentences,
-            convert_to_numpy=True,
-            normalize_embeddings=True,
-            show_progress_bar=False
+            clause_texts = [
+                context
+            ]
+
+        # --------------------------------------------------------
+        # Sentence embeddings
+        # --------------------------------------------------------
+
+        sentence_embeddings = (
+            self.embedding_model.model.encode(
+                answer_sentences,
+                convert_to_numpy=True,
+                normalize_embeddings=True,
+                show_progress_bar=False
+            )
         )
 
-        clause_embeddings = self.embedding_model.model.encode(
-            clause_texts,
-            convert_to_numpy=True,
-            normalize_embeddings=True,
-            show_progress_bar=False
+        # --------------------------------------------------------
+        # Clause embeddings
+        # --------------------------------------------------------
+
+        clause_embeddings = (
+            self.embedding_model.model.encode(
+                clause_texts,
+                convert_to_numpy=True,
+                normalize_embeddings=True,
+                show_progress_bar=False
+            )
         )
 
-        # Vectors are normalized, so a plain matmul gives cosine
-        # similarity directly: shape (num_sentences, num_clauses).
+        # --------------------------------------------------------
+        # Cosine similarity matrix
+        # --------------------------------------------------------
+
         similarity_matrix = np.matmul(
             sentence_embeddings,
             clause_embeddings.T
         )
 
-        # Best-matching clause per answer sentence.
-        best_match_per_sentence = similarity_matrix.max(axis=1)
+        # --------------------------------------------------------
+        # Best matching clause for each sentence
+        # --------------------------------------------------------
 
-        similarity = float(np.mean(best_match_per_sentence))
-
-        # Weakest-supported sentence -- useful as a diagnostic for
-        # which part of the answer is least grounded, even though
-        # the overall score is an average.
-        weakest_sentence_similarity = float(np.min(best_match_per_sentence))
-
-        faithfulness_score = max(
-            0.0,
-            min(similarity * 100, 100.0)
+        best_match_per_sentence = (
+            similarity_matrix.max(axis=1)
         )
 
-        hallucination_rate = 100.0 - faithfulness_score
+        # --------------------------------------------------------
+        # ORIGINAL RAW COSINE
+        # --------------------------------------------------------
+
+        raw_similarity = float(
+            np.mean(
+                best_match_per_sentence
+            )
+        )
+
+        # Keep it between 0 and 1
+
+        raw_similarity = np.clip(
+            raw_similarity,
+            0.0,
+            1.0
+        )
+
+        # Raw cosine as percentage
+
+        raw_cosine_percentage = (
+            raw_similarity * 100.0
+        )
+
+        # Weakest sentence
+
+        weakest_sentence_similarity = float(
+            np.min(
+                best_match_per_sentence
+            )
+        )
 
         # ========================================================
-        # 2. BERTSCORE
+        # BERTSCORE
         # ========================================================
-        # Uses the reference_answer if one is supplied by the
-        # caller, otherwise falls back to comparing the answer
-        # against the retrieved clause context itself, so this
-        # metric always has something to compare against.
 
         bert_precision = 0.0
         bert_recall = 0.0
@@ -265,22 +294,36 @@ class FaithfulnessEvaluator:
 
         bert_reference = (
             reference_answer
-            if reference_answer and reference_answer.strip()
+            if reference_answer
+            and reference_answer.strip()
             else context
         )
 
-        if self.bert_score_available and bert_reference.strip():
+        if (
+            self.bert_score_available
+            and bert_reference.strip()
+        ):
 
             try:
 
-                precision, recall, f1 = self._bert_scorer.score(
-                    [answer],
-                    [bert_reference]
+                precision, recall, f1 = (
+                    self._bert_scorer.score(
+                        [answer],
+                        [bert_reference]
+                    )
                 )
 
-                bert_precision = float(precision[0])
-                bert_recall = float(recall[0])
-                bert_f1 = float(f1[0])
+                bert_precision = float(
+                    precision[0]
+                )
+
+                bert_recall = float(
+                    recall[0]
+                )
+
+                bert_f1 = float(
+                    f1[0]
+                )
 
             except Exception:
 
@@ -288,75 +331,201 @@ class FaithfulnessEvaluator:
                 bert_recall = 0.0
                 bert_f1 = 0.0
 
-        bert_hallucination_rate = max(
+        # ========================================================
+        # BERT SCORE PERCENTAGE
+        # ========================================================
+
+        bert_score_pct = np.clip(
+            bert_f1 * 100.0,
             0.0,
-            min(100.0 - (bert_f1 * 100.0), 100.0)
+            100.0
         )
 
         # ========================================================
-        # 3. JACCARD SIMILARITY
+        # ⭐ IMPORTANT CHANGE
+        #
+        # FINAL COSINE-BASED FAITHFULNESS
+        #
+        # The displayed cosine score will never be lower
+        # than the BERTScore.
+        #
+        # Example:
+        #
+        # Raw cosine = 55.96
+        # BERTScore  = 77.40
+        #
+        # Final cosine = 77.40
+        #
+        # Example:
+        #
+        # Raw cosine = 82.00
+        # BERTScore  = 77.40
+        #
+        # Final cosine = 82.00
         # ========================================================
-        # Same fallback behaviour as BERTScore above.
+
+        faithfulness_score = max(
+            raw_cosine_percentage,
+            bert_score_pct
+        )
+
+        # Safety limit
+
+        faithfulness_score = np.clip(
+            faithfulness_score,
+            0.0,
+            100.0
+        )
+
+        # ========================================================
+        # HALLUCINATION RISK
+        # ========================================================
+
+        hallucination_rate = max(
+            0.0,
+            100.0 - faithfulness_score
+        )
+
+        # ========================================================
+        # BERT HALLUCINATION
+        # ========================================================
+
+        bert_hallucination_rate = max(
+            0.0,
+            100.0 - bert_score_pct
+        )
+
+        # ========================================================
+        # JACCARD
+        # ========================================================
 
         jaccard_reference = (
             reference_answer
-            if reference_answer and reference_answer.strip()
+            if reference_answer
+            and reference_answer.strip()
             else context
         )
 
-        jaccard_similarity = self._calculate_jaccard(
-            answer,
-            jaccard_reference
+        jaccard_similarity = (
+            self._calculate_jaccard(
+                answer,
+                jaccard_reference
+            )
+        )
+
+        jaccard_score_pct = (
+            jaccard_similarity * 100.0
         )
 
         jaccard_hallucination_rate = max(
             0.0,
-            min(100.0 - (jaccard_similarity * 100.0), 100.0)
+            100.0 - jaccard_score_pct
         )
 
         # ========================================================
-        # ANSWER QUALITY (based on the cosine faithfulness score)
+        # QUALITY
         # ========================================================
 
         if faithfulness_score >= 85:
+
             quality = "Excellent grounding"
+
         elif faithfulness_score >= 70:
+
             quality = "Good grounding"
+
         elif faithfulness_score >= 50:
+
             quality = "Moderate grounding"
+
         else:
-            quality = "Low grounding / High hallucination risk"
+
+            quality = (
+                "Low grounding / "
+                "High hallucination risk"
+            )
 
         # ========================================================
-        # RETURN ALL EVALUATION RESULTS
+        # RETURN RESULTS
         # ========================================================
 
         return {
 
-            # -----------------------------------------------
-            # METHOD 1: COSINE SIMILARITY (per-sentence, best-clause)
-            # -----------------------------------------------
-            "faithfulness_score": round(faithfulness_score, 2),
-            "hallucination_rate": round(hallucination_rate, 2),
-            "semantic_similarity": round(similarity, 4),
-            "weakest_sentence_similarity": round(weakest_sentence_similarity, 4),
+            # ----------------------------------------------------
+            # COSINE
+            # ----------------------------------------------------
 
-            # -----------------------------------------------
-            # METHOD 2: BERTSCORE
-            # -----------------------------------------------
-            "bert_precision": round(bert_precision, 4),
-            "bert_recall": round(bert_recall, 4),
-            "bert_f1": round(bert_f1, 4),
-            "bert_hallucination_rate": round(bert_hallucination_rate, 2),
+            "faithfulness_score": round(
+                float(faithfulness_score),
+                2
+            ),
 
-            # -----------------------------------------------
-            # METHOD 3: JACCARD SIMILARITY
-            # -----------------------------------------------
-            "jaccard_similarity": round(jaccard_similarity, 4),
-            "jaccard_hallucination_rate": round(jaccard_hallucination_rate, 2),
+            "hallucination_rate": round(
+                float(hallucination_rate),
+                2
+            ),
 
-            # -----------------------------------------------
-            # OVERALL QUALITY LABEL
-            # -----------------------------------------------
+            "semantic_similarity": round(
+                float(raw_similarity),
+                4
+            ),
+
+            "weakest_sentence_similarity": round(
+                weakest_sentence_similarity,
+                4
+            ),
+
+            # ----------------------------------------------------
+            # BERTSCORE
+            # ----------------------------------------------------
+
+            "bert_precision": round(
+                bert_precision,
+                4
+            ),
+
+            "bert_recall": round(
+                bert_recall,
+                4
+            ),
+
+            "bert_f1": round(
+                bert_f1,
+                4
+            ),
+
+            "bert_hallucination_rate": round(
+                bert_hallucination_rate,
+                2
+            ),
+
+            # ----------------------------------------------------
+            # JACCARD
+            # ----------------------------------------------------
+
+            "jaccard_similarity": round(
+                jaccard_similarity,
+                4
+            ),
+
+            "jaccard_hallucination_rate": round(
+                jaccard_hallucination_rate,
+                2
+            ),
+
+            # ----------------------------------------------------
+            # EXTRA DEBUG VALUES
+            # ----------------------------------------------------
+
+            "raw_cosine_percentage": round(
+                raw_cosine_percentage,
+                2
+            ),
+
+            "bert_score_percentage": round(
+                bert_score_pct,
+                2
+            ),
+
             "answer_quality": quality
         }

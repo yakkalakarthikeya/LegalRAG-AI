@@ -342,37 +342,25 @@ class FaithfulnessEvaluator:
         )
 
         # ========================================================
-        # ⭐ IMPORTANT CHANGE
-        #
         # FINAL COSINE-BASED FAITHFULNESS
+        # ========================================================
+        # IMPORTANT:
+        # Keep cosine similarity completely independent from
+        # BERTScore.
         #
-        # The displayed cosine score will never be lower
-        # than the BERTScore.
+        # The graph and the raw similarity must represent the
+        # exact same metric:
         #
-        # Example:
+        # raw_similarity = 0.5198
+        # raw_cosine_percentage = 51.98
+        # faithfulness_score = 51.98
         #
-        # Raw cosine = 55.96
-        # BERTScore  = 77.40
-        #
-        # Final cosine = 77.40
-        #
-        # Example:
-        #
-        # Raw cosine = 82.00
-        # BERTScore  = 77.40
-        #
-        # Final cosine = 82.00
+        # BERTScore is calculated separately and is NOT used
+        # to modify the cosine similarity.
         # ========================================================
 
-        faithfulness_score = max(
-            raw_cosine_percentage,
-            bert_score_pct
-        )
-
-        # Safety limit
-
         faithfulness_score = np.clip(
-            faithfulness_score,
+            raw_cosine_percentage,
             0.0,
             100.0
         )
@@ -516,6 +504,14 @@ class FaithfulnessEvaluator:
             # ----------------------------------------------------
             # EXTRA DEBUG VALUES
             # ----------------------------------------------------
+
+            # Explicit cosine percentage for the UI.
+            # This is exactly raw_similarity * 100 and must be used
+            # for the Cosine Similarity gauge.
+            "cosine_score_percentage": round(
+                raw_cosine_percentage,
+                2
+            ),
 
             "raw_cosine_percentage": round(
                 raw_cosine_percentage,

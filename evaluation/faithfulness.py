@@ -187,30 +187,74 @@ class FaithfulnessEvaluator:
         # COSINE SIMILARITY
         # ========================================================
 
-        answer_sentences = self._split_sentences(
+        MIN_CONTENT_WORDS = 4  # filters filler/transition sentences
+
+        answer_sentences_raw = self._split_sentences(
             answer
         )
 
-        if not answer_sentences:
+        if not answer_sentences_raw:
 
-            answer_sentences = [
+            answer_sentences_raw = [
                 answer
             ]
 
-        clause_texts = [
-            clause.get("text", "")
-            for clause in selected_clauses
-            if clause.get("text", "").strip()
+        # --------------------------------------------------------
+        # Keep only content-bearing answer sentences.
+        # Short transition/filler sentences ("In summary," /
+        # "Let's look at this.") have no real clause counterpart
+        # and only drag the average down without reflecting
+        # actual hallucination.
+        # --------------------------------------------------------
+
+        answer_sentences = [
+            sentence
+            for sentence in answer_sentences_raw
+            if len(
+                re.findall(
+                    r"[a-zA-Z0-9]+",
+                    sentence
+                )
+            ) >= MIN_CONTENT_WORDS
         ]
 
-        if not clause_texts:
+        if not answer_sentences:
 
-            clause_texts = [
+            answer_sentences = answer_sentences_raw
+
+        # --------------------------------------------------------
+        # Split clauses into sentences too, instead of comparing
+        # against the whole clause block. This lets a specific
+        # answer sentence match the specific part of the clause
+        # it is actually grounded in, rather than getting an
+        # averaged-out similarity against an entire clause of
+        # mixed content.
+        # --------------------------------------------------------
+
+        clause_sentences = []
+
+        for clause in selected_clauses:
+
+            clause_text = clause.get("text", "")
+
+            if not clause_text.strip():
+                continue
+
+            pieces = self._split_sentences(clause_text)
+
+            if pieces:
+                clause_sentences.extend(pieces)
+            else:
+                clause_sentences.append(clause_text)
+
+        if not clause_sentences:
+
+            clause_sentences = [
                 context
             ]
 
         # --------------------------------------------------------
-        # Sentence embeddings
+        # Sentence embeddings (answer side)
         # --------------------------------------------------------
 
         sentence_embeddings = (
@@ -223,12 +267,12 @@ class FaithfulnessEvaluator:
         )
 
         # --------------------------------------------------------
-        # Clause embeddings
+        # Sentence embeddings (clause side)
         # --------------------------------------------------------
 
         clause_embeddings = (
             self.embedding_model.model.encode(
-                clause_texts,
+                clause_sentences,
                 convert_to_numpy=True,
                 normalize_embeddings=True,
                 show_progress_bar=False
@@ -237,6 +281,7 @@ class FaithfulnessEvaluator:
 
         # --------------------------------------------------------
         # Cosine similarity matrix
+        # (answer sentences x clause sentences)
         # --------------------------------------------------------
 
         similarity_matrix = np.matmul(
@@ -245,7 +290,7 @@ class FaithfulnessEvaluator:
         )
 
         # --------------------------------------------------------
-        # Best matching clause for each sentence
+        # Best matching clause sentence for each answer sentence
         # --------------------------------------------------------
 
         best_match_per_sentence = (
@@ -253,12 +298,36 @@ class FaithfulnessEvaluator:
         )
 
         # --------------------------------------------------------
-        # ORIGINAL RAW COSINE
+        # Weighted average: longer, more informative sentences
+        # count more than short ones, so a short low-content
+        # sentence doesn't carry the same weight as a long,
+        # information-dense one.
+        # --------------------------------------------------------
+
+        sentence_weights = np.array(
+            [
+                max(
+                    len(
+                        re.findall(
+                            r"[a-zA-Z0-9]+",
+                            sentence
+                        )
+                    ),
+                    1
+                )
+                for sentence in answer_sentences
+            ],
+            dtype=float
+        )
+
+        # --------------------------------------------------------
+        # ORIGINAL RAW COSINE (now sentence-level + weighted)
         # --------------------------------------------------------
 
         raw_similarity = float(
-            np.mean(
-                best_match_per_sentence
+            np.average(
+                best_match_per_sentence,
+                weights=sentence_weights
             )
         )
 

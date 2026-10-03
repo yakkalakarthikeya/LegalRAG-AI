@@ -1,6 +1,8 @@
 import re
 import numpy as np
 
+from evaluation.jaccard_evaluator import JaccardEvaluator
+
 
 class FaithfulnessEvaluator:
 
@@ -11,6 +13,7 @@ class FaithfulnessEvaluator:
     ):
 
         self.embedding_model = embedding_model
+        self.jaccard_evaluator = JaccardEvaluator()
 
         # ============================================================
         # BERTScore
@@ -44,7 +47,7 @@ class FaithfulnessEvaluator:
     def _split_sentences(self, text):
 
         raw_sentences = re.split(
-            r"(?<=[.!?])\s+",
+            r"(?<=[.!?;])\s+|\n+",
             text.strip()
         )
 
@@ -67,54 +70,32 @@ class FaithfulnessEvaluator:
 
         return sentences
 
-    # ============================================================
-    # JACCARD TOKENIZATION
-    # ============================================================
+    def _is_content_sentence(self, sentence):
+        """Exclude report headings and citation-only fragments from scoring."""
+        cleaned = re.sub(r"\[[^\]]{0,80}\]", " ", sentence)
+        words = re.findall(r"[a-zA-Z]{2,}", cleaned.lower())
+        heading_words = {
+            "analysis", "conclusion", "executive", "limitations",
+            "provisions", "relevant", "summary", "synthesis",
+        }
+        return len(words) >= 4 and not set(words).issubset(heading_words)
 
-    def _tokenize_for_jaccard(self, text):
+    def _build_clause_passages(self, selected_clauses, context):
+        """Create focused sentence, adjacent-sentence, and clause candidates."""
+        passages = []
+        for clause in selected_clauses:
+            clause_text = clause.get("text", "").strip()
+            if not clause_text:
+                continue
+            sentences = self._split_sentences(clause_text)
+            passages.extend(sentences)
+            passages.extend(
+                f"{sentences[index]} {sentences[index + 1]}"
+                for index in range(len(sentences) - 1)
+            )
+            passages.append(clause_text)
 
-        words = re.findall(
-            r"\b[a-zA-Z0-9]+\b",
-            text.lower()
-        )
-
-        return set(words)
-
-    # ============================================================
-    # JACCARD
-    # ============================================================
-
-    def _calculate_jaccard(
-        self,
-        answer,
-        reference_answer
-    ):
-
-        answer_words = self._tokenize_for_jaccard(
-            answer
-        )
-
-        reference_words = self._tokenize_for_jaccard(
-            reference_answer
-        )
-
-        if not answer_words or not reference_words:
-
-            return 0.0
-
-        intersection = answer_words & reference_words
-
-        union = answer_words | reference_words
-
-        if not union:
-
-            return 0.0
-
-        return (
-            len(intersection)
-            /
-            len(union)
-        )
+        return list(dict.fromkeys(p for p in passages if p.strip())) or [context]
 
     # ============================================================
     # MAIN EVALUATION
@@ -187,8 +168,6 @@ class FaithfulnessEvaluator:
         # COSINE SIMILARITY
         # ========================================================
 
-        MIN_CONTENT_WORDS = 4  # filters filler/transition sentences
-
         answer_sentences_raw = self._split_sentences(
             answer
         )
@@ -210,12 +189,7 @@ class FaithfulnessEvaluator:
         answer_sentences = [
             sentence
             for sentence in answer_sentences_raw
-            if len(
-                re.findall(
-                    r"[a-zA-Z0-9]+",
-                    sentence
-                )
-            ) >= MIN_CONTENT_WORDS
+            if self._is_content_sentence(sentence)
         ]
 
         if not answer_sentences:
@@ -231,27 +205,7 @@ class FaithfulnessEvaluator:
         # mixed content.
         # --------------------------------------------------------
 
-        clause_sentences = []
-
-        for clause in selected_clauses:
-
-            clause_text = clause.get("text", "")
-
-            if not clause_text.strip():
-                continue
-
-            pieces = self._split_sentences(clause_text)
-
-            if pieces:
-                clause_sentences.extend(pieces)
-            else:
-                clause_sentences.append(clause_text)
-
-        if not clause_sentences:
-
-            clause_sentences = [
-                context
-            ]
+        clause_sentences = self._build_clause_passages(selected_clauses, context)
 
         # --------------------------------------------------------
         # Sentence embeddings (answer side)
@@ -463,11 +417,9 @@ class FaithfulnessEvaluator:
             else context
         )
 
-        jaccard_similarity = (
-            self._calculate_jaccard(
-                answer,
-                jaccard_reference
-            )
+        jaccard_similarity = self.jaccard_evaluator.score(
+            answer,
+            jaccard_reference
         )
 
         jaccard_score_pct = (

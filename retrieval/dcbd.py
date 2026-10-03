@@ -2,9 +2,9 @@ class DCBD:
     
     def __init__(
         self,
-        coverage_threshold=0.75,
-        min_clauses=3,
-        max_clauses=6
+        coverage_threshold=0.60,
+        min_clauses=2,
+        max_clauses=4
     ):
 
         self.coverage_threshold = coverage_threshold
@@ -12,7 +12,7 @@ class DCBD:
         self.max_clauses = max_clauses
 
     # =====================================================
-    # SELECT CLAUSES USING CUMULATIVE SIMILARITY
+    # SELECT MOST RELEVANT CLAUSES
     # =====================================================
 
     def select_clauses(
@@ -20,12 +20,7 @@ class DCBD:
         retrieval_results
     ):
 
-        # -----------------------------------------
-        # No retrieval results
-        # -----------------------------------------
-
         if not retrieval_results:
-
             return []
 
         # -----------------------------------------
@@ -34,12 +29,25 @@ class DCBD:
 
         results = sorted(
             retrieval_results,
-            key=lambda x: x["score"],
+            key=lambda x: float(x["score"]),
             reverse=True
         )
 
         # -----------------------------------------
-        # If fewer than minimum clauses
+        # Keep only positive similarities
+        # -----------------------------------------
+
+        results = [
+            item
+            for item in results
+            if float(item["score"]) > 0
+        ]
+
+        if not results:
+            return []
+
+        # -----------------------------------------
+        # If only a few clauses exist
         # -----------------------------------------
 
         if len(results) <= self.min_clauses:
@@ -47,11 +55,11 @@ class DCBD:
             return results
 
         # -----------------------------------------
-        # Calculate total similarity
+        # Total similarity
         # -----------------------------------------
 
         total_similarity = sum(
-            max(float(item["score"]), 0.0)
+            float(item["score"])
             for item in results
         )
 
@@ -62,7 +70,7 @@ class DCBD:
             ]
 
         # -----------------------------------------
-        # Cumulative selection
+        # Cumulative similarity
         # -----------------------------------------
 
         selected = []
@@ -71,22 +79,21 @@ class DCBD:
 
         for item in results:
 
-            score = max(
-                float(item["score"]),
-                0.0
-            )
-
             selected.append(item)
 
-            cumulative_similarity += score
+            cumulative_similarity += float(
+                item["score"]
+            )
 
             coverage = (
-                cumulative_similarity /
+                cumulative_similarity
+                /
                 total_similarity
             )
 
             # -------------------------------------
-            # Stop when coverage is reached
+            # Stop when enough relevant context
+            # has been selected
             # -------------------------------------
 
             if (
@@ -98,7 +105,7 @@ class DCBD:
                 break
 
             # -------------------------------------
-            # Safety limit
+            # Maximum context limit
             # -------------------------------------
 
             if len(selected) >= self.max_clauses:
@@ -106,7 +113,7 @@ class DCBD:
                 break
 
         # -----------------------------------------
-        # Guarantee minimum number of clauses
+        # Guarantee minimum
         # -----------------------------------------
 
         if len(selected) < self.min_clauses:

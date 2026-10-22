@@ -1,0 +1,9 @@
+streamlit
+PyMuPDF
+numpy
+faiss-cpu
+sentence-transformers
+groq
+python-dotenv
+plotly
+bert-score==0.3.13
